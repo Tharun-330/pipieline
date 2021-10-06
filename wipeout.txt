@@ -1,0 +1,207 @@
+pipeline {
+    agent {label 'master'}
+	
+    stages {
+
+		stage('DOWNLOAD BUILT APP'){
+			steps{
+				echo '#################################### DOWNLOADING BUILT ZIP FROM S3 BUCKET ####################################'
+				
+				bat "aws s3 cp s3://${env:ACE_BUILD_ARCHIVE_BUCKET_NAME}/quaddeliverybuilds/common-acehe-builds/${env:build_env}/LearningMate.Products.ACE-BuildNo-${env:BUILD_JOB_NUMBER}.zip ${env:WORKSPACE}/ACE-Build.zip --only-show-errors"
+				echo '************************************* BUILT ZIP DOWNLOADED *************************************'				
+			}
+		}
+		
+		stage('CONFIGURING ACE APP'){
+		    steps{
+				dir("$WORKSPACE/CICD_Scripts/Delivery-HE/app-deploy/powershell"){
+				
+					powershell '''						
+						$BUILD_ZIP_PATH="${env:WORKSPACE}/ACE-Build.zip"
+						
+						$infra = Get-Content "${env:WORKSPACE}/../infrajson/${env:INFRA_JSON}" | Out-String | ConvertFrom-Json						
+						$MEMCACHED_URL=$infra.ec_memcached_url.value	    
+						$CF_URL=$infra.cloudfront_url_alias.value	    
+						$DB_PVT_IP=$infra.db_server_private_ips.value
+						$S3_BUCKET_NAME=$infra.s3_bucket_name.value
+						
+																
+						./configure-net-app.ps1 ${env:WORKSPACE} ${env:ACE_DOMAIN} $DB_PVT_IP ${env:DB_USERNAME} ${env:DB_PASSWORD} $MEMCACHED_URL $CF_URL $BUILD_ZIP_PATH $S3_BUCKET_NAME ${env:CF_PVT_RSA_KEY} ${env:CF_KEY_PAIR_ID} ${env:S3_ACCESS_KEY_ID} ${env:S3_SECRET_KEY} ${env:QUAD_AUTH_URL} ${env:DOMAIN_NAME} ${env:SMTP_SERVER} ${env:SMTP_USERNAME} ${env:SMTP_PASSWORD} ${env:LMS_SSO_MEEBASE_URL} ${env:LMS_SSO_QUAD_REDIRECTION_URL} ${env:LMS_SSO_DEFAULT_REDIRECTION_URL} ${env:AWS_S3_BUCKET_REGION} ${env:Auth_ACETOQUAD_ClientId} ${env:Auth_AlturaReport_AuthorizeApicacheExpiry} ${env:Mee_Integration_User_Roles} ${env:ResourceType_LMS_Curriculum} ${env:ResourceType_MACX_IND} ${env:LMSBaseURL}
+						
+						Write-Host '---delete build archive---'
+						If(Test-Path "$BUILD_ZIP_PATH") { rm -r -fo "$BUILD_ZIP_PATH" } Else { echo 'nothing to remove' }
+					'''
+				}
+				
+		    }
+		}
+		
+		stage('CONFIGURING AssessmentPlayer APP'){
+		    steps{
+				dir("$WORKSPACE/CICD_Scripts/Delivery-HE/app-deploy/powershell"){
+				
+					powershell '''
+						$infra = Get-Content "${env:WORKSPACE}/../infrajson/${env:INFRA_JSON}" | Out-String | ConvertFrom-Json
+						
+						./configure-ng-app.ps1 ${env:WORKSPACE} ${env:ACE_DOMAIN}
+					'''
+				}
+				
+		    }
+		}
+
+		stage('BUILDING AssessmentPlayer APPLICATION'){
+		    environment {
+				BUILD_VERSION = "${BUILD_ID}"
+			}
+			steps{
+				
+				echo '#################################### BUILDING APPLICATION USING NPM & NG ####################################'
+				
+				dir("${WORKSPACE}/TSG/SourceCodeACE/LearningMate.Products.ACE/LearningMate.Products.Q.Deliver.AssessmentPlayer") {
+					//bat	"ng build --preserve-symlinks --output-path player --base-href /player/ --env=devops"
+					powershell '''
+						if ($env:PROCESSOR_ARCHITEW6432 -eq "AMD64") {
+						write-warning "Your Powershell is 32 Bit, we're off to 64-bit Powershell....."
+						if ($myInvocation.Line) {
+							&"$env:WINDIR/sysnative/windowspowershell/v1.0/powershell.exe" -NonInteractive -NoProfile $myInvocation.Line
+						}else{
+							&"$env:WINDIR/sysnative/windowspowershell/v1.0/powershell.exe" -NonInteractive -NoProfile -file "$($myInvocation.InvocationName)" $args
+						}
+						exit $lastexitcode
+						}					
+					
+						npm cache clean --force
+						Remove-Item package-lock.json -ErrorAction Ignore
+						nvm use 12.14.0
+						node -v
+						npm install
+						ng build --preserve-symlinks --base-href=/player/ --configuration=devops
+						nvm use 10.17.0
+						node -v
+						
+						[string]$sourceDirectory  = "./player"
+						[string]$destinationDirectory = "${env:WORKSPACE}/ace-eb-app-pkg/PLAYER"
+						Copy-item -Force -Recurse -Verbose $sourceDirectory -Destination $destinationDirectory
+						
+						[string]$sourceFiles  = "${env:WORKSPACE}/CICD_Scripts/Delivery-HE/app-deploy/player-config-files/*"
+						Copy-item -Force -Recurse -Verbose $sourceFiles -Destination $destinationDirectory
+						
+						Write-Host "deleting build ./player"
+						If(Test-Path $sourceDirectory) { rm -r -fo $sourceDirectory } Else { echo 'nothing to remove' }
+					'''				
+			    }
+				
+				dir("${WORKSPACE}/TSG/SourceCodeACE/LearningMate.Products.ACE/LearningMate.Products.Q.Deliver.AssessmentBuilder") {
+					//bat "ng build --preserve-symlinks --output-path builder --base-href /Builder/ --env=devops --aot=false"
+
+					powershell '''
+						if ($env:PROCESSOR_ARCHITEW6432 -eq "AMD64") {
+						write-warning "Your Powershell is 32 Bit, we're off to 64-bit Powershell....."
+						if ($myInvocation.Line) {
+							&"$env:WINDIR/sysnative/windowspowershell/v1.0/powershell.exe" -NonInteractive -NoProfile $myInvocation.Line
+						}else{
+							&"$env:WINDIR/sysnative/windowspowershell/v1.0/powershell.exe" -NonInteractive -NoProfile -file "$($myInvocation.InvocationName)" $args
+						}
+						exit $lastexitcode
+						}
+						
+						npm cache clean --force
+						Remove-Item package-lock.json -ErrorAction Ignore
+						nvm use 12.14.0
+						node -v
+						npm install
+						ng build --preserve-symlinks --base-href=/Builder/ --configuration=devops
+						nvm use 10.17.0
+						node -v
+
+						[string]$sourceDirectory  = "./builder"
+						[string]$destinationDirectory = "${env:WORKSPACE}/ace-eb-app-pkg/BUILDER"
+						Copy-item -Force -Recurse -Verbose $sourceDirectory -Destination $destinationDirectory
+						
+						[string]$sourceFiles  = "${env:WORKSPACE}/CICD_Scripts/Delivery-HE/app-deploy/player-config-files/*"
+						Copy-item -Force -Recurse -Verbose $sourceFiles -Destination $destinationDirectory
+						
+						Write-Host "deleting build ./builder"
+						If(Test-Path $sourceDirectory) { rm -r -fo $sourceDirectory } Else { echo 'nothing to remove' }
+					'''				
+			    }
+				echo '---------------------------------------------------- BUILDING APPLICATION DONE ----------------------------------------------------'
+			}
+		}
+		
+		stage('UPLOADING NEW VERSION TO S3'){
+			steps{
+				echo '#################################### UPLOADING NEW VERSION TO S3 BUCKET ####################################'
+				powershell '''
+				[string]$sourceDirectory  = "${env:WORKSPACE}\\ace-eb-app-pkg\\."
+				[string]$destinationZip = "${env:WORKSPACE}\\Version-${env:BUILD_JOB_NUMBER}-${env:BUILD_NUMBER}.zip"
+				#Compress-Archive -U -Path $sourceDirectory -DestinationPath "$destinationZip"
+				Add-Type -assembly "system.io.compression.filesystem"
+                [io.compression.zipfile]::CreateFromDirectory($sourceDirectory, $destinationZip)
+									
+				aws s3 cp "$destinationZip" "s3://${env:ACE_BUILD_ARCHIVE_BUCKET_NAME}/quaddeliverybuilds/${env:ENVIRONMENT}/Version-${env:BUILD_JOB_NUMBER}-${env:BUILD_NUMBER}.zip" --only-show-errors
+				
+				Write-Host '---delete build archive---'
+				If(Test-Path "$destinationZip") { rm -r -fo "$destinationZip" } Else { echo 'nothing to remove' }
+				
+				'''
+				
+				echo '************************************* APP VERSIOON ZIP UPLOADED *************************************'				
+			}
+		}
+		
+		stage('DEPLOY APPLICATION ON BEANSTALK'){
+			steps{
+				powershell '''
+				$infra = Get-Content "${env:WORKSPACE}/../infrajson/${env:INFRA_JSON}" | Out-String | ConvertFrom-Json
+				$EB_APP_NAME=$infra.eb_app_name.value	
+				$EB_ENV_NAME=$infra.eb_env_name.value	
+				
+				Write-Host "Version-Label will be:  <project>-<environment>-<build_job_number>-<deploy_job_number>"
+				$VERSION_LABEL="${env:PROJECT}-${env:ENVIRONMENT}-Version-${env:BUILD_JOB_NUMBER}-${env:BUILD_NUMBER}"
+				
+				Write-Host '------Creating new application version for beanstalk--------'
+                aws elasticbeanstalk create-application-version --application-name $EB_APP_NAME --version-label $VERSION_LABEL --description "${env:PROJECT} QuaDDelivery Build for ${env:ENVIRONMENT} Version-${env:BUILD_JOB_NUMBER}" --source-bundle S3Bucket=\"${env:ACE_BUILD_ARCHIVE_BUCKET_NAME}\"`,S3Key=\"quaddeliverybuilds/${env:ENVIRONMENT}/Version-${env:BUILD_JOB_NUMBER}-${env:BUILD_NUMBER}.zip\" --auto-create-application --region ${env:AWS_REGION}
+				
+				Write-Host '------Updating beanstalk version label-------'
+				aws elasticbeanstalk update-environment --environment-name $EB_ENV_NAME --version-label $VERSION_LABEL --region ${env:AWS_REGION}
+				'''
+			}
+		}
+		stage ('EXECUTING STORED PROCEEDURES'){
+            steps{
+			
+				dir("$WORKSPACE/CICD_Scripts/Delivery-HE/app-deploy/powershell"){
+					powershell '''
+					    if (${env:DB_Execution} -eq "Yes"){
+						write-host "Executing Database scripts"
+						$infra = Get-Content "${env:WORKSPACE}/../infrajson/${env:INFRA_JSON}" | Out-String | ConvertFrom-Json
+						$DB_PVT_IP=$infra.db_server_private_ips.value
+						$DEPLOYMENTSCRIPTPATH = "${env:WORKSPACE}/TSG/SourceCodeACE/LearningMate.Products.ACE/DBScripts"
+						
+						$DATABASE_NAMES = "ACEHE", "AceHEContent", "ACEGradeBookHE", "ACEUserManagementHE"
+						
+						Write-Host '------ Executing Table Manipulator ------'
+						foreach($DBNAME in $DATABASE_NAMES){
+							./DBScriptExecutorTM.ps1 $DB_PVT_IP $DBNAME ${env:DB_USERNAME} ${env:DB_PASSWORD} $DEPLOYMENTSCRIPTPATH											
+							cd "${env:WORKSPACE}/CICD_Scripts/Delivery-HE/app-deploy/powershell"
+						}
+						Write-Host '------ Executing Rest DB Scripts ------'
+						foreach($DBNAME in $DATABASE_NAMES){
+							./DBScriptExecutor.ps1 $DB_PVT_IP $DBNAME ${env:DB_USERNAME} ${env:DB_PASSWORD} $DEPLOYMENTSCRIPTPATH											
+							cd "${env:WORKSPACE}/CICD_Scripts/Delivery-HE/app-deploy/powershell"
+						}
+						}
+						else{write-host "Skipping execution of database scripts"}
+					'''
+					
+				}
+					
+			}
+        }
+       
+	}
+	
+	
+}
